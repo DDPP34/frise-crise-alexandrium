@@ -1,0 +1,372 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<title>Frise chronologique – crise Alexandrium</title>
+<!--
+  Widget personnalisé Grist – frise chronologique de crise (DDPP34 / SIVEP)
+  Lit les tables Zones, Points, Parametres, Resultats, Mesures, Journal
+  (accès « complet » au document requis). Mise à jour automatique toutes les 30 s.
+-->
+<script src="https://docs.getgrist.com/grist-plugin-api.js"></script>
+<script src="https://unpkg.com/vis-timeline@7.7.3/standalone/umd/vis-timeline-graph2d.min.js"></script>
+<link rel="stylesheet" href="https://unpkg.com/vis-timeline@7.7.3/styles/vis-timeline-graph2d.min.css">
+<style>
+  :root { --rouge:#c62828; --rouge-clair:#ffebee; --orange:#ef6c00; --orange-clair:#fff3e0;
+          --vert:#2e7d32; --vert-clair:#e8f5e9; --bleu:#1565c0; --gris:#757575; --fond:#fafafa; }
+  * { box-sizing: border-box; }
+  body { margin:0; font-family: system-ui, -apple-system, "Segoe UI", Roboto, Arial, sans-serif;
+         font-size:13px; color:#222; background:#fff; }
+  header { display:flex; flex-wrap:wrap; align-items:center; gap:12px; padding:8px 10px;
+           border-bottom:1px solid #ddd; background:var(--fond); }
+  header h1 { font-size:14px; margin:0 8px 0 0; }
+  header label { display:flex; align-items:center; gap:4px; white-space:nowrap; }
+  header select, header button { font:inherit; padding:2px 6px; }
+  #maj { margin-left:auto; color:var(--gris); font-size:12px; }
+  .legende { display:flex; flex-wrap:wrap; gap:10px; padding:4px 10px; font-size:12px; color:#444;
+             border-bottom:1px solid #eee; }
+  .legende span::before { content:""; display:inline-block; width:12px; height:12px; margin-right:4px;
+                          vertical-align:-2px; border-radius:2px; }
+  .lg-alerte::before { background:var(--rouge); }
+  .lg-ok::before { background:#fff; border:1px solid var(--vert); }
+  .lg-ld::before { background:#eee; border:1px solid #bbb; }
+  .lg-fermee::before { background:var(--rouge-clair); border:1px solid #f5b5b5; }
+  .lg-surv::before { background:var(--orange-clair); border:1px solid #ffcc80; }
+  .lg-mesure::before { background:var(--bleu); }
+  .lg-projet::before { background:#fff; border:1px dashed var(--bleu); }
+  #erreur { display:none; margin:10px; padding:10px; background:var(--rouge-clair); color:var(--rouge);
+            border:1px solid #f5b5b5; border-radius:4px; white-space:pre-wrap; }
+  #frise { height: calc(100vh - 80px); }
+
+  /* Groupes (lignes) */
+  .vis-label .vis-inner { padding:4px 6px; }
+  .vis-label.groupe-point .vis-inner { padding-left:18px; color:#444; }
+  .vis-label.groupe-zone { background:#f3f6fa; }
+  .vis-label.groupe-journal { background:#f7f7f7; }
+  .etat { display:inline-block; margin-top:2px; padding:0 6px; border-radius:8px; font-size:11px; font-weight:600; }
+  .etat.fermee { background:var(--rouge); color:#fff; }
+  .etat.surveillance { background:var(--orange); color:#fff; }
+  .etat.ouverte { background:var(--vert); color:#fff; }
+
+  /* Périodes de fermeture / surveillance (fond) */
+  .vis-item.vis-background.periode-fermee { background:rgba(198,40,40,.12); }
+  .vis-item.vis-background.periode-surveillance { background:rgba(239,108,0,.12); }
+
+  /* Pas de trait vertical reliant chaque élément à l'axe : la frise reste lisible */
+  .vis-item.vis-line, .vis-item.vis-dot { display:none; }
+
+  /* Résultats */
+  .vis-item.res { font-size:11px; line-height:1.2; text-align:center; border-radius:3px; }
+  .vis-item.res.alerte { background:var(--rouge); border-color:#8e0000; color:#fff; font-weight:600; }
+  .vis-item.res.ok { background:#fff; border-color:var(--vert); color:var(--vert); }
+  .vis-item.res.ld { background:#eee; border-color:#bbb; color:#777; }
+  .vis-item.res small { font-weight:400; opacity:.9; }
+
+  /* Mesures */
+  .vis-item.mesure { background:var(--bleu); border-color:#0d47a1; color:#fff; font-weight:600; border-radius:3px; }
+  .vis-item.mesure.fermeture { background:var(--rouge); border-color:#8e0000; }
+  .vis-item.mesure.reouverture { background:var(--vert); border-color:#1b5e20; }
+  .vis-item.mesure.surveillance-renforcee { background:var(--orange); border-color:#bf360c; }
+  .vis-item.mesure.projet { background:#fff; color:#0d47a1; border-style:dashed; }
+  .vis-item.mesure.abroge { opacity:.45; text-decoration:line-through; }
+
+  /* Main courante */
+  .vis-item.journal { font-size:11px; color:#333; }
+  .vis-item.journal .vis-dot { border-color:#555; }
+  .vis-item.journal.decision { font-weight:700; color:var(--bleu); }
+  .vis-item.journal.decision .vis-dot { border-color:var(--bleu); }
+
+  .vis-tooltip { max-width:380px; white-space:normal !important; font-size:12px; line-height:1.35; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Crise Alexandrium – frise chronologique</h1>
+  <label>Zone
+    <select id="zone"><option value="all">Toutes les zones</option></select>
+  </label>
+  <label><input type="checkbox" id="masquerLD" checked> Masquer les « &lt; LD »</label>
+  <label><input type="checkbox" id="alertesSeules"> Seulement les dépassements</label>
+  <button id="aujourdhui" title="Recentrer sur les 30 derniers jours">30 derniers jours</button>
+  <button id="toutVoir" title="Afficher toute la période">Tout voir</button>
+  <button id="actualiser" title="Recharger les données">Actualiser</button>
+  <span id="maj">Chargement…</span>
+</header>
+<div class="legende">
+  <span class="lg-alerte">Résultat &gt; seuil</span>
+  <span class="lg-ok">Résultat ≤ seuil</span>
+  <span class="lg-ld">&lt; LD</span>
+  <span class="lg-mesure">Mesure signée / notifiée</span>
+  <span class="lg-projet">Mesure en projet</span>
+  <span class="lg-fermee">Zone fermée</span>
+  <span class="lg-surv">Surveillance renforcée</span>
+</div>
+<div id="erreur"></div>
+<div id="frise"></div>
+
+<script>
+"use strict";
+
+/* Identifiants des tables Grist (à adapter si vous les renommez) */
+const TABLES = {
+  zones: "Zones", points: "Points", params: "Parametres",
+  res: "Resultats", mes: "Mesures", jour: "Journal"
+};
+const INTERVALLE_MAJ_MS = 30000;
+const JOUR_MS = 86400000;
+
+const groupes = new vis.DataSet();
+const elements = new vis.DataSet();
+let frise = null;
+let donnees = null;
+let premierAffichage = true;
+
+/* ---------- Utilitaires ---------- */
+function esc(v) {
+  return String(v == null ? "" : v)
+    .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+}
+function slug(v) {
+  return String(v || "").toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "")
+    .replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+}
+function tronquer(t, n) { t = String(t || ""); return t.length > n ? t.slice(0, n - 1) + "…" : t; }
+function versDate(s) {               // Grist : secondes depuis 1970 (Date et DateTime)
+  return (s === null || s === undefined || s === "" || typeof s !== "number") ? null : new Date(s * 1000);
+}
+function fmtNombre(v) {
+  return (typeof v === "number") ? v.toLocaleString("fr-FR", { maximumFractionDigits: 2 }) : esc(v);
+}
+function fmtDate(d, avecHeure) {
+  if (!d) return "";
+  const o = { day: "2-digit", month: "2-digit", year: "numeric" };
+  if (avecHeure) { o.hour = "2-digit"; o.minute = "2-digit"; }
+  return d.toLocaleString("fr-FR", o);
+}
+function liste(v) {                  // ChoiceList / RefList Grist : ["L", a, b…]
+  return Array.isArray(v) ? (v[0] === "L" ? v.slice(1) : v) : [];
+}
+function enLignes(table) {           // format colonnes Grist → tableau d'objets
+  const cles = Object.keys(table), n = (table.id || []).length, sortie = [];
+  for (let i = 0; i < n; i++) {
+    const o = {};
+    for (const c of cles) o[c] = table[c][i];
+    sortie.push(o);
+  }
+  return sortie;
+}
+function afficherErreur(msg) {
+  const e = document.getElementById("erreur");
+  e.textContent = msg; e.style.display = msg ? "block" : "none";
+}
+
+/* ---------- Lecture des données ---------- */
+async function chargerDonnees() {
+  const cles = Object.keys(TABLES);
+  const tables = await Promise.all(cles.map(k => grist.docApi.fetchTable(TABLES[k])));
+  const d = {};
+  cles.forEach((k, i) => { d[k] = enLignes(tables[i]); });
+  return d;
+}
+
+/* ---------- Construction de la frise ---------- */
+function construire() {
+  if (!donnees) return;
+  const zoneChoisie = document.getElementById("zone").value;
+  const masquerLD = document.getElementById("masquerLD").checked;
+  const alertesSeules = document.getElementById("alertesSeules").checked;
+  const maintenant = new Date();
+
+  const params = new Map(donnees.params.map(p => [p.id, p]));
+  const points = new Map(donnees.points.map(p => [p.id, p]));
+  const g = [], it = [];
+
+  g.push({ id: "journal", content: "<b>Main courante</b>", order: 0, className: "groupe-journal" });
+  let ordre = 1;
+
+  const zones = donnees.zones
+    .filter(z => zoneChoisie === "all" || String(z.id) === zoneChoisie)
+    .sort((a, b) => String(a.Code || "").localeCompare(String(b.Code || ""), "fr"));
+
+  for (const z of zones) {
+    const etat = z.Etat || "";
+    g.push({
+      id: "z" + z.id, order: ordre++, className: "groupe-zone",
+      content: `<b>${esc(z.Code)} ${esc(z.Nom)}</b>` +
+               (etat ? `<br><span class="etat ${slug(etat) === "fermee" ? "fermee" :
+                 slug(etat) === "sous-surveillance" ? "surveillance" : "ouverte"}">${esc(etat)}</span>` : "")
+    });
+    const pts = donnees.points.filter(p => p.Zone === z.id)
+      .sort((a, b) => String(a.Code || "").localeCompare(String(b.Code || ""), "fr"));
+    for (const p of pts) {
+      g.push({ id: "p" + p.id, order: ordre++, className: "groupe-point",
+               content: esc(p.Nom || p.Code) + (p.Code && p.Nom ? `<br><small>${esc(p.Code)}</small>` : "") });
+    }
+    const idsLignesZone = ["z" + z.id].concat(pts.map(p => "p" + p.id));
+
+    /* Périodes de fermeture / surveillance, d'après les mesures signées ou notifiées */
+    const mesures = donnees.mes.filter(m => m.Zone === z.id && versDate(m.Date))
+      .sort((a, b) => a.Date - b.Date);
+    const etatParType = { "Fermeture": "fermee", "Réouverture": "ouverte", "Surveillance renforcée": "surveillance" };
+    let etatCourant = "ouverte", debut = null, nPeriode = 0;
+    const ajouterPeriode = (deb, fin, e) => {
+      nPeriode++;
+      for (const gid of idsLignesZone) {
+        it.push({ id: `bg-${z.id}-${nPeriode}-${gid}`, group: gid, start: deb, end: fin,
+                  type: "background", className: "periode-" + e });
+      }
+    };
+    for (const m of mesures) {
+      if (!["Signé", "Notifié"].includes(m.Statut)) continue;
+      const e = etatParType[m.Type];
+      if (!e) continue;
+      const d = versDate(m.Date);
+      if (etatCourant !== "ouverte" && debut && d > debut) ajouterPeriode(debut, d, etatCourant);
+      etatCourant = e; debut = d;
+    }
+    if (etatCourant !== "ouverte" && debut) ajouterPeriode(debut, new Date(maintenant.getTime() + JOUR_MS), etatCourant);
+
+    /* Mesures */
+    for (const m of mesures) {
+      const d = versDate(m.Date), f = versDate(m.Date_fin);
+      const plage = f && f > d;
+      const especes = liste(m.Especes).join(", ");
+      const infobulle = [
+        `<b>${esc(m.Type)}</b>${m.Reference ? " – n° " + esc(m.Reference) : ""}`,
+        `Date : ${fmtDate(d)}${plage ? " → " + fmtDate(f) : ""}`,
+        `Statut : ${esc(m.Statut || "non renseigné")}`,
+        especes ? `Espèces : ${esc(especes)}` : "",
+        m.Commentaire ? esc(m.Commentaire) : ""
+      ].filter(Boolean).join("<br>");
+      it.push({
+        id: "m" + m.id, group: "z" + z.id, start: d, end: plage ? f : undefined,
+        type: plage ? "range" : "box",
+        content: esc(m.Type) + (m.Reference ? ` <small>n° ${esc(m.Reference)}</small>` : ""),
+        className: "mesure " + slug(m.Type) +
+                   (m.Statut === "En projet" ? " projet" : "") + (m.Statut === "Abrogé" ? " abroge" : ""),
+        title: infobulle
+      });
+    }
+  }
+
+  const groupesPresents = new Set(g.map(x => x.id));
+
+  /* Résultats */
+  for (const r of donnees.res) {
+    const p = points.get(r.Point);
+    if (!p || !groupesPresents.has("p" + p.id)) continue;
+    const d = versDate(r.Date_prelevement);
+    if (!d) continue;
+    if (masquerLD && r.Inf_LD) continue;
+    if (alertesSeules && !r.Depassement) continue;
+    const par = params.get(r.Parametre) || {};
+    const valeur = r.Inf_LD ? "&lt; LD" : fmtNombre(r.Valeur);
+    const libelle = par.Abrege || par.Nom || "";
+    const support = r.Support && r.Support !== "Eau" ? r.Support : "";
+    const infobulle = [
+      `<b>${esc(p.Nom || p.Code)}</b> – ${fmtDate(d)}`,
+      `${esc(par.Nom || "")}${support ? " (" + esc(support) + ")" : ""}`,
+      `Valeur : ${valeur} ${esc(par.Unite || "")}`,
+      par.Seuil ? `Seuil : ${fmtNombre(par.Seuil)} ${esc(par.Unite || "")}` +
+                  (r.Rapport_seuil ? ` – ${fmtNombre(r.Rapport_seuil)} × le seuil` : "") : "",
+      r.Laboratoire ? `Laboratoire : ${esc(r.Laboratoire)}` : "",
+      r.Date_reception ? `Reçu le ${fmtDate(versDate(r.Date_reception))}` : "",
+      r.Commentaire ? esc(r.Commentaire) : ""
+    ].filter(Boolean).join("<br>");
+    it.push({
+      id: "r" + r.id, group: "p" + p.id, start: d, type: "box",
+      content: `${valeur}<br><small>${esc(tronquer(libelle, 28))}${support ? " – " + esc(support) : ""}</small>`,
+      className: "res " + (r.Depassement ? "alerte" : (r.Inf_LD ? "ld" : "ok")),
+      title: infobulle
+    });
+  }
+
+  /* Main courante */
+  for (const j of donnees.jour) {
+    const d = versDate(j.Horodatage);
+    if (!d) continue;
+    if (zoneChoisie !== "all" && j.Zone && String(j.Zone) !== zoneChoisie) continue;
+    const texte = (j.Categorie ? j.Categorie + " : " : "") + (j.Evenement || "");
+    const infobulle = [
+      `<b>${esc(j.Categorie || "Événement")}</b> – ${fmtDate(d, true)}`,
+      j.Auteur ? `Par ${esc(j.Auteur)}` : "",
+      esc(j.Evenement || ""),
+      j.Suite ? `<i>Suite :</i> ${esc(j.Suite)}` : ""
+    ].filter(Boolean).join("<br>");
+    it.push({ id: "j" + j.id, group: "journal", start: d, type: "point",
+              content: esc(tronquer(texte, 60)), className: "journal " + slug(j.Categorie), title: infobulle });
+  }
+
+  /* Mise à jour sans perdre la position de la frise */
+  const idsG = new Set(g.map(x => x.id)), idsI = new Set(it.map(x => x.id));
+  groupes.remove(groupes.getIds().filter(id => !idsG.has(id)));
+  elements.remove(elements.getIds().filter(id => !idsI.has(id)));
+  groupes.update(g);
+  elements.update(it);
+
+  if (premierAffichage) { premierAffichage = false; fenetre30Jours(); }
+}
+
+function remplirListeZones() {
+  const sel = document.getElementById("zone"), valeur = sel.value;
+  const zones = donnees.zones.slice().sort((a, b) => String(a.Code || "").localeCompare(String(b.Code || ""), "fr"));
+  sel.innerHTML = '<option value="all">Toutes les zones</option>' +
+    zones.map(z => `<option value="${z.id}">${esc(z.Code)} ${esc(z.Nom)}</option>`).join("");
+  sel.value = [...sel.options].some(o => o.value === valeur) ? valeur : "all";
+}
+
+function fenetre30Jours() {
+  const now = Date.now();
+  frise.setWindow(new Date(now - 30 * JOUR_MS), new Date(now + 10 * JOUR_MS), { animation: false });
+}
+
+let enCours = false;
+async function actualiser() {
+  if (enCours) return;
+  enCours = true;
+  try {
+    donnees = await chargerDonnees();
+    afficherErreur("");
+    remplirListeZones();
+    construire();
+    document.getElementById("maj").textContent =
+      "Mis à jour à " + new Date().toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+  } catch (e) {
+    afficherErreur("Impossible de lire les tables du document.\n" +
+      "Vérifiez que le widget a l'accès « complet » au document et que les tables " +
+      Object.values(TABLES).join(", ") + " existent.\n\nDétail : " + (e && e.message ? e.message : e));
+    document.getElementById("maj").textContent = "Erreur de lecture";
+  } finally {
+    enCours = false;
+  }
+}
+
+/* ---------- Initialisation ---------- */
+frise = new vis.Timeline(document.getElementById("frise"), elements, groupes, {
+  locale: "fr",
+  stack: true,
+  orientation: { axis: "top", item: "top" },
+  zoomMin: 6 * 3600 * 1000,
+  zoomMax: 5 * 365 * JOUR_MS,
+  groupOrder: "order",
+  showCurrentTime: true,
+  margin: { item: { horizontal: 4, vertical: 4 } },
+  tooltip: { followMouse: true, overflowMethod: "cap" },
+  xss: { disabled: true }    // le contenu est déjà échappé par esc()
+});
+
+document.getElementById("zone").addEventListener("change", construire);
+document.getElementById("masquerLD").addEventListener("change", construire);
+document.getElementById("alertesSeules").addEventListener("change", construire);
+document.getElementById("actualiser").addEventListener("click", actualiser);
+document.getElementById("aujourdhui").addEventListener("click", fenetre30Jours);
+document.getElementById("toutVoir").addEventListener("click", () => frise.fit({ animation: false }));
+
+grist.ready({ requiredAccess: "full" });
+grist.onRecords(() => actualiser());   // réagit tout de suite aux modifications de la table liée
+actualiser();
+setInterval(actualiser, INTERVALLE_MAJ_MS);
+</script>
+</body>
+</html>
