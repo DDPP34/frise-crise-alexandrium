@@ -185,9 +185,8 @@ function construire() {
   g.push({ id: "journal", content: "<b>Main courante</b>", order: 0, className: "groupe-journal" });
   let ordre = 1;
 
-  const zones = donnees.zones
-    .filter(z => zoneChoisie === "all" || String(z.id) === zoneChoisie)
-    .sort((a, b) => String(a.Code || "").localeCompare(String(b.Code || ""), "fr"));
+  const zones = zonesVisibles()
+    .filter(z => zoneChoisie === "all" || String(z.id) === zoneChoisie);
 
   for (const z of zones) {
     const etat = z.Etat || "";
@@ -197,16 +196,16 @@ function construire() {
                (etat ? `<br><span class="etat ${slug(etat) === "fermee" ? "fermee" :
                  slug(etat) === "sous-surveillance" ? "surveillance" : "ouverte"}">${esc(etat)}</span>` : "")
     });
-    const pts = donnees.points.filter(p => p.Zone === z.id)
+    const pts = donnees.points.filter(p => zonesDe(p).includes(z.id))
       .sort((a, b) => String(a.Code || "").localeCompare(String(b.Code || ""), "fr"));
     for (const p of pts) {
-      g.push({ id: "p" + p.id, order: ordre++, className: "groupe-point",
+      g.push({ id: `p${z.id}-${p.id}`, order: ordre++, className: "groupe-point",
                content: esc(p.Nom || p.Code) + (p.Code && p.Nom ? `<br><small>${esc(p.Code)}</small>` : "") });
     }
-    const idsLignesZone = ["z" + z.id].concat(pts.map(p => "p" + p.id));
+    const idsLignesZone = ["z" + z.id].concat(pts.map(p => `p${z.id}-${p.id}`));
 
     /* Périodes de fermeture / surveillance, d'après les mesures signées ou notifiées */
-    const mesures = donnees.mes.filter(m => m.Zone === z.id && versDate(m.Date))
+    const mesures = donnees.mes.filter(m => zonesDe(m).includes(z.id) && versDate(m.Date))
       .sort((a, b) => a.Date - b.Date);
     const etatParType = { "Fermeture": "fermee", "Réouverture": "ouverte", "Surveillance renforcée": "surveillance" };
     let etatCourant = "ouverte", debut = null, nPeriode = 0;
@@ -240,7 +239,7 @@ function construire() {
         m.Commentaire ? esc(m.Commentaire) : ""
       ].filter(Boolean).join("<br>");
       it.push({
-        id: "m" + m.id, group: "z" + z.id, start: d, end: plage ? f : undefined,
+        id: `m${m.id}-${z.id}`, group: "z" + z.id, start: d, end: plage ? f : undefined,
         type: plage ? "range" : "box",
         content: esc(m.Type) + (m.Reference ? ` <small>n° ${esc(m.Reference)}</small>` : ""),
         className: "mesure " + slug(m.Type) +
@@ -255,7 +254,9 @@ function construire() {
   /* Résultats */
   for (const r of donnees.res) {
     const p = points.get(r.Point);
-    if (!p || !groupesPresents.has("p" + p.id)) continue;
+    if (!p) continue;
+    const lignesPoint = zonesDe(p).map(zid => `p${zid}-${p.id}`).filter(gid => groupesPresents.has(gid));
+    if (!lignesPoint.length) continue;
     const d = versDate(r.Date_prelevement);
     if (!d) continue;
     if (masquerLD && r.Inf_LD) continue;
@@ -274,12 +275,14 @@ function construire() {
       r.Date_reception ? `Reçu le ${fmtDate(versDate(r.Date_reception))}` : "",
       r.Commentaire ? esc(r.Commentaire) : ""
     ].filter(Boolean).join("<br>");
-    it.push({
-      id: "r" + r.id, group: "p" + p.id, start: d, type: "box",
-      content: `${valeur}<br><small>${esc(tronquer(libelle, 28))}${support ? " – " + esc(support) : ""}</small>`,
-      className: "res " + (r.Depassement ? "alerte" : (r.Inf_LD ? "ld" : "ok")),
-      title: infobulle
-    });
+    for (const gid of lignesPoint) {   // un point rattaché à plusieurs zones apparaît sous chacune
+      it.push({
+        id: `r${r.id}-${gid}`, group: gid, start: d, type: "box",
+        content: `${valeur}<br><small>${esc(tronquer(libelle, 28))}${support ? " – " + esc(support) : ""}</small>`,
+        className: "res " + (r.Depassement ? "alerte" : (r.Inf_LD ? "ld" : "ok")),
+        title: infobulle
+      });
+    }
   }
 
   /* Main courante */
@@ -308,9 +311,25 @@ function construire() {
   if (premierAffichage) { premierAffichage = false; fenetre30Jours(); }
 }
 
+/* Zones d'un point ou d'une mesure : colonne Zones (plusieurs) ou, à défaut, ancienne colonne Zone */
+function zonesDe(o) {
+  const l = liste(o.Zones);
+  if (l.length) return l;
+  return (typeof o.Zone === "number" && o.Zone) ? [o.Zone] : liste(o.Zone);
+}
+
+/* On n'affiche que les zones qui ont au moins un point de suivi ou une mesure */
+function zonesVisibles() {
+  const utiles = new Set();
+  for (const p of donnees.points) zonesDe(p).forEach(z => utiles.add(z));
+  for (const m of donnees.mes) zonesDe(m).forEach(z => utiles.add(z));
+  return donnees.zones.filter(z => utiles.has(z.id))
+    .sort((a, b) => String(a.Code || "").localeCompare(String(b.Code || ""), "fr"));
+}
+
 function remplirListeZones() {
   const sel = document.getElementById("zone"), valeur = sel.value;
-  const zones = donnees.zones.slice().sort((a, b) => String(a.Code || "").localeCompare(String(b.Code || ""), "fr"));
+  const zones = zonesVisibles();
   sel.innerHTML = '<option value="all">Toutes les zones</option>' +
     zones.map(z => `<option value="${z.id}">${esc(z.Code)} ${esc(z.Nom)}</option>`).join("");
   sel.value = [...sel.options].some(o => o.value === valeur) ? valeur : "all";
